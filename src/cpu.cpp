@@ -1835,4 +1835,611 @@ void CPU::debugTLB() const {
 }
 
 // End of Part 17 - continue in Part 18
-// (paste here code in Part 18)
+// -----------------------------------------------------------
+// CPU Core - Extended SPECIAL ops, LOAD/STORE hookup, and
+// helper plumbing (Part 18)
+// -----------------------------------------------------------
+//
+// Additions in this part:
+//  - Implement MULT/MULTU/DIV/DIVU, MFHI/MFLO/MTHI/MTLO
+//  - Implement SLT/SLTU
+//  - Ensure currentOpcode is tracked for MMU translate use
+//  - Wire load/store opcodes to translateAddress/read32/write32 helpers
+//  - Add a few utility helpers for sign/zero extensions
+//
+// Note: this part intentionally uses both `memory` and `mem` naming
+// in places; adapt to whichever your project's Memory instance is called.
+// -----------------------------------------------------------
+
+#include <limits>
+
+// Ensure currentOpcode exists (used by translateAddress/MMU)
+uint32_t CPU::currentOpcode = 0; // Definition for the static/instance field used earlier
+
+// Sign-extend a 16-bit immediate into 32-bit signed value, return as int32_t
+static inline int32_t signExtend16(uint32_t imm) {
+    return static_cast<int16_t>(imm & 0xFFFF);
+}
+
+// Zero-extend 16-bit immediate
+static inline uint32_t zeroExtend16(uint32_t imm) {
+    return imm & 0xFFFFu;
+}
+
+// Helper: safe fetch with I-cache cooperation and alignment check
+uint32_t CPU::fetchInstrAt(uint64_t vaddr) {
+    // Try icache first (if available)
+    uint32_t instr = 0;
+    if (tryICache(vaddr, instr)) {
+        return instr;
+    }
+
+    // Alignment check
+    if (vaddr & 0x3) {
+        handleException(ExceptionCode::AdEL);
+        return 0;
+    }
+
+    // Address translation (TLB/MMU)
+    auto phys = translateAddress(vaddr);
+    if (!phys) {
+        // TLB miss handling above already printed; signal exception
+        handleException(ExceptionCode::RI);
+        return 0;
+    }
+
+    // Read from memory
+    uint32_t fetched = memory.read32(static_cast<uint32_t>(*phys));
+    // Update I-cache
+    updateICache(vaddr, fetched);
+    return fetched;
+}
+
+// Extended SPECIAL decoder (merge/augment previous SPECIAL handlers)
+void CPU::handleSPECIAL_extended(uint32_t instr) {
+    uint32_t funct = instr & 0x3F;
+    uint32_t rs = (instr >> 21) & 0x1F;
+    uint32_t rt = (instr >> 16) & 0x1F;
+    uint32_t rd = (instr >> 11) & 0x1F;
+    uint32_t shamt = (instr >> 6) & 0x1F;
+
+    switch (funct) {
+        // Arithmetic already handled earlier: ADD/ADDU/SUB/AND/OR ...
+        // Multiply / Divide group
+        case 0x18: { // MULT
+            int64_t a = static_cast<int32_t>(GPR[rs]);
+            int64_t b = static_cast<int32_t>(GPR[rt]);
+            int64_t prod = a * b;
+            HI = static_cast<uint64_t>((static_cast<uint64_t>(prod) >> 32) & 0xFFFFFFFFu);
+            LO = static_cast<uint64_t>(static_cast<uint32_t>(prod & 0xFFFFFFFFu));
+            if (traceEnabled) std::cout << "[EXEC] MULT $" << rs << ", $" << rt << " -> HI/LO\n";
+            break;
+        }
+        case 0x19: { // MULTU
+            uint64_t a = static_cast<uint32_t>(GPR[rs]);
+            uint64_t b = static_cast<uint32_t>(GPR[rt]);
+            uint64_t prod = a * b;
+            HI = (prod >> 32) & 0xFFFFFFFFu;
+            LO = prod & 0xFFFFFFFFu;
+            if (traceEnabled) std::cout << "[EXEC] MULTU $" << rs << ", $" << rt << " -> HI/LO\n";
+            break;
+        }
+        case 0x1A: { // DIV
+            int32_t a = static_cast<int32_t>(GPR[rs]);
+            int32_t b = static_cast<int32_t>(GPR[rt]);
+            if (b == 0) {
+                // Division by zero: result unspecified on many MIPS; set HI/LO as implementation chooses
+                raiseException(ExceptionCode::RI);
+            } else {
+                LO = static_cast<uint32_t>(a / b);
+                HI = static_cast<uint32_t>(a % b);
+                if (traceEnabled) std::cout << "[EXEC] DIV $" << rs << ", $" << rt << " -> LO(div) HI(rem)\n";
+            }
+            break;
+        }
+        case 0x1B: { // DIVU
+            uint32_t a = static_cast<uint32_t>(GPR[rs]);
+            uint32_t b = static_cast<uint32_t>(GPR[rt]);
+            if (b == 0) {
+                raiseException(ExceptionCode::RI);
+            } else {
+                LO = static_cast<uint32_t>(a / b);
+                HI = static_cast<uint32_t>(a % b);
+                if (traceEnabled) std::cout << "[EXEC] DIVU $" << rs << ", $" << rt << "\n";
+            }
+            break;
+        }
+
+        // Move to/from HI/LO
+        case 0x10: // MFHI
+            setReg(rd, HI);
+            if (traceEnabled) std::cout << "[EXEC] MFHI $" << rd << "\n";
+            break;
+        case 0x12: // MFLO
+            setReg(rd, LO);
+            if (traceEnabled) std::cout << "[EXEC] MFLO $" << rd << "\n";
+            break;
+        case 0x11: // MTHI
+            setHI(getReg(rs));
+            if (traceEnabled) std::cout << "[EXEC] MTHI $" << rs << "\n";
+            break;
+        case 0x13: // MTLO
+            setLO(getReg(rs));
+            if (traceEnabled) std::cout << "[EXEC] MTLO $" << rs << "\n";
+            break;
+
+        // Set on less than (signed / unsigned)
+        case 0x2A: // SLT
+            setReg(rd, (static_cast<int32_t>(GPR[rs]) < static_cast<int32_t>(GPR[rt])) ? 1 : 0);
+            if (traceEnabled) std::cout << "[EXEC] SLT $" << rd << ", $" << rs << ", $" << rt << "\n";
+            break;
+        case 0x2B: // SLTU
+            setReg(rd, (static_cast<uint32_t>(GPR[rs]) < static_cast<uint32_t>(GPR[rt])) ? 1 : 0);
+            if (traceEnabled) std::cout << "[EXEC] SLTU $" << rd << ", $" << rs << ", $" << rt << "\n";
+            break;
+
+        // Previously implemented JR, SLL, SRL, SRA, SYSCALL etc. Fallback to generic handler
+        default:
+            // Call older handler (if present) or warn
+            if (traceEnabled) {
+                std::cout << "[WARN] SPECIAL (extended) unhandled funct=0x" << std::hex << funct << std::dec << "\n";
+            }
+            break;
+    }
+}
+
+// Hook load/store opcodes to MMU-aware helpers.
+// This will offload actual read/write to read32/write32 which perform translation & exception handling.
+void CPU::handleLoadStore(uint32_t instr) {
+    uint32_t opcode = (instr >> 26) & 0x3F;
+    uint32_t rs = (instr >> 21) & 0x1F;
+    uint32_t rt = (instr >> 16) & 0x1F;
+    int32_t imm = static_cast<int16_t>(instr & 0xFFFF);
+    uint64_t vaddr = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(GPR[rs]) + imm));
+
+    switch (opcode) {
+        case 0x23: { // LW
+            uint32_t val = read32(vaddr);
+            setReg(rt, static_cast<uint32_t>(val));
+            if (traceEnabled) {
+                std::cout << "[EXEC] LW $" << rt << ", " << imm << "($" << rs << ") -> 0x"
+                          << std::hex << val << std::dec << "\n";
+            }
+            break;
+        }
+        case 0x2B: { // SW
+            write32(vaddr, static_cast<uint32_t>(getReg(rt)));
+            if (traceEnabled) {
+                std::cout << "[EXEC] SW $" << rt << ", " << imm << "($" << rs << ") <- 0x"
+                          << std::hex << getReg(rt) << std::dec << "\n";
+            }
+            break;
+        }
+        case 0x21: { // LH
+            uint32_t raw = read32(vaddr & ~0x3u); // read aligned word and pick half
+            // determine halfword offset
+            uint32_t half = (vaddr & 0x2u) ? (raw >> 16) & 0xFFFFu : raw & 0xFFFFu;
+            int16_t sval = static_cast<int16_t>(half);
+            setReg(rt, static_cast<int32_t>(sval));
+            if (traceEnabled) std::cout << "[EXEC] LH $" << rt << ", " << imm << "($" << rs << ")\n";
+            break;
+        }
+        case 0x25: { // LHU
+            uint32_t raw = read32(vaddr & ~0x3u);
+            uint32_t half = (vaddr & 0x2u) ? (raw >> 16) & 0xFFFFu : raw & 0xFFFFu;
+            setReg(rt, half);
+            if (traceEnabled) std::cout << "[EXEC] LHU $" << rt << ", " << imm << "($" << rs << ")\n";
+            break;
+        }
+        case 0x29: { // SH
+            uint32_t aligned = vaddr & ~0x3u;
+            uint32_t raw = read32(aligned);
+            uint16_t half = static_cast<uint16_t>(getReg(rt) & 0xFFFFu);
+            if (vaddr & 0x2u) {
+                raw = (raw & 0x0000FFFFu) | (static_cast<uint32_t>(half) << 16);
+            } else {
+                raw = (raw & 0xFFFF0000u) | static_cast<uint32_t>(half);
+            }
+            write32(aligned, raw);
+            if (traceEnabled) std::cout << "[EXEC] SH $" << rt << ", " << imm << "($" << rs << ")\n";
+            break;
+        }
+        case 0x20: { // LB
+            uint32_t raw = read32(vaddr & ~0x3u);
+            uint32_t byteShift = (vaddr & 0x3u) * 8;
+            int8_t b = static_cast<int8_t>((raw >> byteShift) & 0xFFu);
+            setReg(rt, static_cast<int32_t>(b));
+            if (traceEnabled) std::cout << "[EXEC] LB $" << rt << ", " << imm << "($" << rs << ")\n";
+            break;
+        }
+        case 0x24: { // LBU
+            uint32_t raw = read32(vaddr & ~0x3u);
+            uint32_t byteShift = (vaddr & 0x3u) * 8;
+            uint8_t b = static_cast<uint8_t>((raw >> byteShift) & 0xFFu);
+            setReg(rt, b);
+            if (traceEnabled) std::cout << "[EXEC] LBU $" << rt << ", " << imm << "($" << rs << ")\n";
+            break;
+        }
+        case 0x28: { // SB
+            uint32_t aligned = vaddr & ~0x3u;
+            uint32_t raw = read32(aligned);
+            uint32_t byteShift = (vaddr & 0x3u) * 8;
+            uint32_t mask = ~(0xFFu << byteShift);
+            uint32_t newraw = (raw & mask) | ((static_cast<uint32_t>(getReg(rt) & 0xFFu) << byteShift));
+            write32(aligned, newraw);
+            if (traceEnabled) std::cout << "[EXEC] SB $" << rt << ", " << imm << "($" << rs << ")\n";
+            break;
+        }
+        default:
+            std::cout << "[WARN] Unhandled load/store opcode 0x" << std::hex << opcode << std::dec << "\n";
+            break;
+    }
+}
+
+// Top-level opcode dispatcher augmentation to integrate SPECIAL extended and loads/stores
+void CPU::decodeExecute_augmented(uint32_t instr) {
+    // track current opcode for MMU heuristics
+    currentOpcode = instr;
+
+    uint32_t opcode = (instr >> 26) & 0x3F;
+
+    switch (opcode) {
+        case 0x00: // SPECIAL - route to extended handler
+            handleSPECIAL_extended(instr);
+            break;
+
+        // Branches
+        case 0x04: // BEQ
+            handleBranch(instr, true);
+            break;
+        case 0x05: // BNE
+            handleBranch(instr, false);
+            break;
+
+        // Immediate arithmetic & logical ops (some already in earlier parts)
+        case 0x08: // ADDI
+        case 0x09: // ADDIU
+        case 0x0C: // ANDI
+        case 0x0D: // ORI
+        case 0x0E: // XORI
+        case 0x0A: // SLTI
+        case 0x0B: // SLTIU
+            // Many immediates were implemented earlier; fall through to existing decodeExecute
+            // If older decodeExecute already handles them, leave as-is. Otherwise, implement minimal support:
+            {
+                uint32_t rs = (instr >> 21) & 0x1F;
+                uint32_t rt = (instr >> 16) & 0x1F;
+                uint32_t imm = instr & 0xFFFFu;
+                switch (opcode) {
+                    case 0x08: // ADDI
+                        setReg(rt, static_cast<int32_t>(getReg(rs)) + static_cast<int32_t>(signExtend16(imm)));
+                        break;
+                    case 0x09: // ADDIU
+                        setReg(rt, static_cast<uint32_t>(getReg(rs)) + zeroExtend16(imm));
+                        break;
+                    case 0x0C: // ANDI
+                        setReg(rt, getReg(rs) & zeroExtend16(imm));
+                        break;
+                    case 0x0D: // ORI
+                        setReg(rt, getReg(rs) | zeroExtend16(imm));
+                        break;
+                    case 0x0E: // XORI
+                        setReg(rt, getReg(rs) ^ zeroExtend16(imm));
+                        break;
+                    case 0x0A: // SLTI
+                        setReg(rt, (static_cast<int32_t>(getReg(rs)) < static_cast<int32_t>(signExtend16(imm))) ? 1 : 0);
+                        break;
+                    case 0x0B: // SLTIU
+                        setReg(rt, (static_cast<uint32_t>(getReg(rs)) < zeroExtend16(imm)) ? 1 : 0);
+                        break;
+                }
+                if (traceEnabled) {
+                    std::cout << "[EXEC] IMM opcode 0x" << std::hex << opcode << std::dec << "\n";
+                }
+            }
+            break;
+
+        // Loads & Stores
+        case 0x23: // LW
+        case 0x2B: // SW
+        case 0x21: // LH
+        case 0x25: // LHU
+        case 0x29: // SH
+        case 0x20: // LB
+        case 0x24: // LBU
+        case 0x28: // SB
+            handleLoadStore(instr);
+            break;
+
+        // Jumps
+        case 0x02:
+            handleJ(instr);
+            break;
+        case 0x03:
+            handleJAL(instr);
+            break;
+
+        default:
+            std::cout << "[WARN] decodeExecute_augmented: Unhandled opcode 0x" << std::hex << opcode << std::dec << "\n";
+            break;
+    }
+}
+
+// Replace previous decodeExecute calls in run/step/pipeline to use the augmented dispatcher
+// If your code earlier called decodeExecute(instr), search/replace to decodeExecute_augmented(instr)
+// in the surrounding source files or call it explicitly at callsites.
+//
+// Example replacement (if using step()):
+//    uint32_t instr = fetchInstrAt(PC);
+//    decodeExecute_augmented(instr);
+//    PC += 4;
+//
+// For pipeline: ensure exec stage uses decodeExecute_augmented(execStage.instr);
+
+// End of Part 18
+// -----------------------------------------------------------
+// CPU Core - COP0, Exceptions, Branch/Delay handling, and
+// some control-flow helpers (Part 19)
+// -----------------------------------------------------------
+//
+// Additions in this part:
+//  - Basic COP0 MFC0 / MTC0 handling (move from/to CP0 registers)
+//  - ERET handling (return from exception) and exception entry helper
+//  - Syscall & BREAK handling (raise appropriate exceptions)
+//  - JALR & JR link/return handling and branch-delay bookkeeping
+//  - Simple interrupt check hook (timer/async interrupts can call raiseHWInterrupt)
+//  - Integration notes: wire these handlers into main dispatcher
+//
+// This part intentionally keeps implementations conservative so they
+// can be adjusted to your CPU/CP0 layout and existing exception model.
+//
+// Assumptions (adapt as needed):
+//  - CPU class has:
+//      uint32_t GPR[32]; uint64_t PC, nextPC;
+//      uint32_t CP0[32];         // or a CP0 map: adapt if different
+//      bool inDelaySlot;        // branch-delay tracking
+//      bool traceEnabled;
+//      void handleException(ExceptionCode code, uint32_t info=0);
+//      void raiseException(ExceptionCode code);
+//      void raiseHWInterrupt(int irq); // external interrupt from devices
+//      uint32_t getReg(unsigned idx), setReg(unsigned idx, uint32_t val)
+//      uint32_t read32(uint64_t vaddr), void write32(uint64_t vaddr, uint32_t val)
+//      void setPC(uint64_t addr), uint64_t getPC()
+//  - ExceptionCode enum contains: Syscall, Break, AdEL, RI, Int, etc.
+//  - ERET uses CP0 status/cause/epc semantics similar to MIPS
+//
+// If your project uses different names/structures, grep/replace accordingly.
+//
+// -----------------------------------------------------------
+
+#include <cassert>
+
+// Basic CP0 register access (MFC0 / MTC0)
+// instr is the full 32-bit instruction (we read rd/rt fields same as SPECIAL layout)
+void CPU::handleCOP0(uint32_t instr) {
+    uint32_t rt = (instr >> 16) & 0x1F;
+    uint32_t rd = (instr >> 11) & 0x1F; // cp0 register number or subfield
+    uint32_t rs = (instr >> 21) & 0x1F; // usually selects operation (MFC0=0x00, MTC0=0x04)
+    uint32_t opcode = (instr >> 26) & 0x3F;
+
+    // COP0 primary opcode is usually 0x10 (coprocessor 0)
+    // decode rs for MFC0/MTC0/BC0/COFUN
+    switch (rs) {
+        case 0x00: { // MFC0 - Move from CP0 to GPR
+            uint32_t val = readCP0(rd);
+            setReg(rt, val);
+            if (traceEnabled) std::cout << "[EXEC] MFC0 $" << rt << ", CP0[" << rd << "] = 0x" << std::hex << val << std::dec << "\n";
+            break;
+        }
+        case 0x04: { // MTC0 - Move to CP0 from GPR
+            uint32_t val = getReg(rt);
+            writeCP0(rd, val);
+            if (traceEnabled) std::cout << "[EXEC] MTC0 CP0[" << rd << "] <- 0x" << std::hex << val << std::dec << "\n";
+            break;
+        }
+        case 0x10: { // BC0x - Branch on COP0 condition (e.g., BC0F/BC0T)
+            // treat as branch depending on a flag in CP0 (implementation-specific)
+            // use rt low bit to discriminate (rt==0: BC0F, rt==1: BC0T)
+            bool cond = (CP0ConditionFlag()); // implement according to your CP0 Cause/Status bits
+            bool isTaken = ((instr >> 16) & 0x1) ? !cond : cond; // slightly defensive
+            if (isTaken) {
+                int16_t imm = static_cast<int16_t>(instr & 0xFFFF);
+                uint64_t target = nextPC + (static_cast<int32_t>(imm) << 2);
+                branchTo(target, true); // record delay slot
+            } else {
+                // not taken: still advance normally
+            }
+            if (traceEnabled) std::cout << "[EXEC] BC0 cond -> " << isTaken << "\n";
+            break;
+        }
+        default:
+            // For other coprocessor functions, dispatch by function field (bits 0..5)
+            {
+                uint32_t funct = instr & 0x3F;
+                if (funct == 0x18) { // ERET (often encoded in COP0 function space)
+                    doERET();
+                    if (traceEnabled) std::cout << "[EXEC] ERET\n";
+                } else {
+                    if (traceEnabled) std::cout << "[WARN] COP0 unhandled rs=0x" << std::hex << rs << " funct=0x" << funct << std::dec << "\n";
+                }
+            }
+            break;
+    }
+}
+
+// Read / write CP0 helpers (abstracted to allow special handling of Status/Cause/EPC)
+uint32_t CPU::readCP0(unsigned reg) {
+    // Customize: some CP0 registers are 64-bit or partially reserved.
+    // Minimal implementation: map into array CP0[32]
+    assert(reg < 32);
+    uint32_t val = CP0[reg];
+    // Optionally mask read-only bits for Status/Cause
+    return val;
+}
+
+void CPU::writeCP0(unsigned reg, uint32_t value) {
+    assert(reg < 32);
+    // Handle side-effects for certain CP0 regs (Status, Cause, EPC, Count/Compare)
+    switch (reg) {
+        case 9: // Count (example)
+            CP0[9] = value;
+            break;
+        case 11: // Compare - writing clears timer interrupt in many MIPS cores
+            CP0[11] = value;
+            // clear timer interrupt bit in Cause/Status (implementation-defined)
+            clearTimerInterrupt();
+            break;
+        case 12: // Status
+            // mask reserved bits properly; don't allow userspace to toggle kernel-only flags incorrectly
+            CP0[12] = value;
+            break;
+        case 13: // Cause (mostly read-only; software may write some bits)
+            CP0[13] = value & 0x000000FFu; // allow only low bits to be modified in this minimal model
+            break;
+        case 14: // EPC
+            CP0[14] = value;
+            break;
+        default:
+            CP0[reg] = value;
+            break;
+    }
+}
+
+// ERET implementation: restore previous mode and PC from EPC.
+// This is a minimal form; real machines must restore Status bits, interrupt masks.
+void CPU::doERET() {
+    // In MIPS: EPC is in CP0 register 14, Status contains mode bits
+    uint32_t epc = CP0[14];
+    // Clear EXL bit in Status (bit 1) to leave exception mode
+    CP0[12] &= ~(1u << 1);
+    // Set PC to EPC (note: EPC may point to the branch delay slot address; real cores sometimes adjust)
+    setPC(static_cast<uint64_t>(epc));
+    // After ERET, pipeline restarts; ensure nextPC is PC+4
+    nextPC = PC + 4;
+    inDelaySlot = false;
+}
+
+// Exception entry helper: save EPC/Cause/Status and enter exception vector.
+void CPU::enterException(ExceptionCode code, uint32_t info) {
+    // Save EPC: if exception happened in a branch delay slot, save PC-4 in EPC and set BD bit in Cause
+    uint32_t epcToSave = static_cast<uint32_t>(PC);
+    if (inDelaySlot) {
+        // If exception occurred in delay slot, EPC should hold the branch's PC (PC - 4)
+        CP0[13] |= (1u << 31); // set BD (Branch Delay) bit in Cause if you model it (bit positions vary)
+        epcToSave = static_cast<uint32_t>(PC - 4);
+    } else {
+        CP0[13] &= ~(1u << 31);
+    }
+    CP0[14] = epcToSave; // EPC
+    // Set Cause register with the exception code in bits 2..6 typically
+    CP0[13] = (CP0[13] & ~0x7C) | ((static_cast<uint32_t>(code) & 0x1F) << 2);
+    // Save Status: set EXL bit to enter exception mode
+    CP0[12] |= (1u << 1); // EXL = 1
+    // Jump to exception vector. For many MIPS: 0x80000080 or 0xBFC00180 for bootstrap; choose one per target.
+    uint64_t vector = 0x80000080ULL; // SGI IP30 typical kernel vector; adapt if needed
+    setPC(vector);
+    nextPC = PC + 4;
+    inDelaySlot = false;
+    if (traceEnabled) std::cout << "[EXC] enterException code=" << static_cast<int>(code) << " EPC=0x" << std::hex << epcToSave << std::dec << "\n";
+}
+
+// Syscall & BREAK handling produce exceptions
+void CPU::handleSyscallBreak(uint32_t instr) {
+    uint32_t funct = instr & 0x3F;
+    if ((instr >> 26) == 0x00 && funct == 0x0C) { // SYSCALL
+        enterException(ExceptionCode::Syscall, 0);
+        if (traceEnabled) std::cout << "[EXEC] SYSCALL -> exception\n";
+    } else if ((instr >> 26) == 0x00 && funct == 0x0D) { // BREAK
+        enterException(ExceptionCode::Break, 0);
+        if (traceEnabled) std::cout << "[EXEC] BREAK -> exception\n";
+    } else {
+        // should not reach here
+    }
+}
+
+// Branch / delay slot helper: perform the branch transfer, recording that the next
+// instruction executed is in a delay slot (typical MIPS behaviour). `target` is branch target.
+// If `link` is true, write PC+8 (per MIPS semantics) to link register (e.g., for JAL)
+void CPU::branchTo(uint64_t target, bool isDelaySlotBranch, bool link, unsigned linkReg) {
+    // In MIPS: the branch executes next instruction in the delay slot (PC+4),
+    // but the branch target is loaded into PC after the delay slot instruction completes.
+    // We implement by setting nextPC to target and marking that we are in a branch with delay slot.
+    // Save link if requested (JAL/JALR)
+    if (link) {
+        uint32_t returnAddr = static_cast<uint32_t>(PC + 8); // PC is current instruction
+        setReg(linkReg, returnAddr);
+    }
+
+    // Record branch target into a deferred slot and mark that we are in delay behavior.
+    pendingBranchTarget = target;
+    pendingBranchTaken = true;
+    // The instruction immediately following (nextPC) will be executed with inDelaySlot==true
+    // Ensure caller sets inDelaySlot before executing the following instruction.
+}
+
+// Call this after executing an instruction to apply any pending branch target
+void CPU::applyPendingBranch() {
+    if (pendingBranchTaken) {
+        setPC(pendingBranchTarget);
+        nextPC = PC + 4;
+        pendingBranchTaken = false;
+        inDelaySlot = false;
+    } else {
+        // normal fall-through
+        setPC(nextPC);
+        nextPC = PC + 4;
+        inDelaySlot = false;
+    }
+}
+
+// JALR & JR handling (JALR writes link to rd, default rd=31 for JALR with no explicit rd)
+void CPU::handleJALR_JR(uint32_t instr) {
+    uint32_t funct = instr & 0x3F;
+    uint32_t rs = (instr >> 21) & 0x1F;
+    uint32_t rd = (instr >> 11) & 0x1F;
+
+    uint64_t target = static_cast<uint64_t>(getReg(rs)) & ~0x3u; // low 2 bits cleared
+    if (funct == 0x09) { // JALR
+        unsigned linkReg = (rd == 0) ? 31 : rd;
+        branchTo(target, true, true, linkReg);
+        if (traceEnabled) std::cout << "[EXEC] JALR $" << rd << " <- link, target=0x" << std::hex << target << std::dec << "\n";
+    } else if (funct == 0x08) { // JR
+        branchTo(target, true, false, 0);
+        if (traceEnabled) std::cout << "[EXEC] JR target=0x" << std::hex << target << std::dec << "\n";
+    } else {
+        // not handled here
+    }
+}
+
+// Very small interrupt test hook. Real implementations compare CP0 Status/Cause & HW lines.
+void CPU::checkPendingInterrupts() {
+    // If CP0 Status enables interrupts and CP0 Cause shows pending, raise an Int exception.
+    // Minimal model: if any HW IRQ flag is set (we track hwInterruptMask/hwInterruptPending),
+    // and EXL bit is clear, then take an interrupt.
+    bool exl = (CP0[12] & (1u << 1)) != 0;
+    if (exl) return; // already in exception handling
+
+    if (hwInterruptPending & hwInterruptMask) {
+        // set Cause IP bits accordingly (implementation-dependent)
+        CP0[13] |= (hwInterruptPending & 0xFF) << 8; // example placement in Cause IP[15:8]
+        enterException(ExceptionCode::Int, 0);
+        if (traceEnabled) std::cout << "[INT] hardware interrupt -> exception\n";
+    }
+}
+
+// Integration notes:
+// - Call checkPendingInterrupts() periodically inside the main step/run loop
+//   (for example once per instruction or once per N cycles).
+// - Ensure decodeExecute_augmented includes calls for COP0 primary opcode (0x10).
+//     case 0x10: handleCOP0(instr); break;
+// - Ensure SPECIAL handler routes JALR/JR to handleJALR_JR when funct == 0x08/0x09,
+//   or augment handleSPECIAL_extended accordingly.
+//
+// Example: in decodeExecute_augmented add:
+//   case 0x10: handleCOP0(instr); break;
+//
+// Also ensure SYS/CALL and BREAK are dispatched somewhere (they are SPECIAL functs 0x0C/0x0D):
+//   if (opcode==0x00 && (instr & 0x3F) in {0x0C,0x0D}) handleSyscallBreak(instr);
+//
+// End of Part 19
+// (paste here code in Part 20)
