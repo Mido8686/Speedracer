@@ -1,52 +1,48 @@
+// -----------------------------------------------------------
+// framebuffer.h
+// -----------------------------------------------------------
+// Speedracer SGI Octane1 Emulator
+// Simple SI/CRM framebuffer:
+//   - 1280x1024
+//   - 32-bit ARGB
+//   - MMIO mapped via emulator.cpp Part 2
+//   - PROM/IRIX will write directly to this buffer
+// -----------------------------------------------------------
+
 #pragma once
 #include <cstdint>
-#include <functional>
-#include <atomic>
+#include <vector>
 
-class Memory; // forward
-
-namespace dev {
-
-struct FramebufferRegs {
-    uint32_t ctrl;    // bit0 = enable
-    uint32_t width;
-    uint32_t height;
-    uint32_t pitch;   // bytes per scanline
-    uint32_t fb_phys; // physical base address of framebuffer
-    uint32_t vsync;   // write to trigger vsync/notify
-};
-
-class FramebufferDevice {
+class Framebuffer {
 public:
-    // callback to notify display thread that a new frame is available
-    using FrameReadyCb = std::function<void()>;
+    Framebuffer();
+    ~Framebuffer();
 
-    FramebufferDevice(Memory* mem, uint64_t mmio_base, FrameReadyCb cb = nullptr);
-    ~FramebufferDevice();
+    // Initialize framebuffer
+    void init(uint32_t w, uint32_t h);
 
-    // MMIO read/write handlers (call from bus)
-    uint32_t mmio_read32(uint64_t offset);
-    void mmio_write32(uint64_t offset, uint32_t val);
+    // Access raw pixel buffer
+    uint8_t* data() { return pixels.data(); }
+    uint32_t size() const { return pixels.size(); }
 
-    // Return pointer to framebuffer memory or nullptr if not available.
-    // This is just a convenience for the SDL display to read pixels.
-    // size is at least pitch * height bytes.
-    uint8_t* fb_ptr(size_t& out_size);
+    // MMIO access (GPU registers)
+    uint32_t read_reg(uint32_t offset);
+    void     write_reg(uint32_t offset, uint32_t value);
 
-    // Register/replace frame-ready callback
-    void set_frame_ready_cb(FrameReadyCb cb);
+    // Direct screen write (PROM/IRIX)
+    void fb_write32(uint32_t offset, uint32_t value);
+    uint32_t fb_read32(uint32_t offset);
 
-    // Helpers
-    uint32_t get_width() const { return regs.width; }
-    uint32_t get_height() const { return regs.height; }
-    uint32_t get_pitch() const { return regs.pitch; }
+    // Get dimensions
+    uint32_t width()  const { return fb_width;  }
+    uint32_t height() const { return fb_height; }
 
 private:
-    Memory* memory;
-    uint64_t mmioBase;
-    FramebufferRegs regs;
-    FrameReadyCb frameCb;
-    std::atomic<bool> frameReadyFlag;
-};
+    std::vector<uint8_t> pixels;  // ARGB8888 framebuffer
+    uint32_t fb_width  = 1280;
+    uint32_t fb_height = 1024;
 
-} // namespace dev
+    // Basic CRM registers (prom expects these)
+    uint32_t crm_status  = 0x00000001; // present
+    uint32_t crm_boardid = 0x00000020; // SI board ID
+};
