@@ -97,200 +97,178 @@ void Emulator::sys_write32(uint64_t phys, uint32_t val)
 // -----------------------------------------------------------
 // emulator.cpp  (Part 2 — Octane1 SI Hardware Map)
 // -----------------------------------------------------------
-// Speedracer SGI Octane1 Emulator
-// Implements:
-//   - RAM region
-//   - HEART MMIO
-//   - HUB MMIO
-//   - MACE I/O (serial, RTC stub)
-//   - SI/CRM Graphics device (framebuffer base)
-//   - PROM-compatible memory routing
+// This section implements MMIO (HEART, HUB, MACE, CRM Graphics)
+// for SGI Octane1 PROM boot compatibility.
 // -----------------------------------------------------------
 // -----------------------------------------------------------
-// Memory map constants for Octane1 (IP30)
+// Octane1 IP30 Memory Map (subset required for PROM 4.9)
 // -----------------------------------------------------------
-
-// RAM is mapped at physical 0x0000_0000 ...  (size configurable)
+// Physical ranges (PROM probes these):
+//
+//   0x1F000000 - HEART registers
+//   0x1F200000 - HUB registers
+//   0x1F400000 - MACE (I/O + UART)
+//   0x1F600000 - CRM / SI Graphics
+//
+// Each region is 2MB.
+// -----------------------------------------------------------
 
 static constexpr uint64_t HEART_BASE = 0x1F000000;
 static constexpr uint64_t HUB_BASE   = 0x1F200000;
 static constexpr uint64_t MACE_BASE  = 0x1F400000;
 static constexpr uint64_t CRM_BASE   = 0x1F600000;
 
-static constexpr uint64_t MMIO_SIZE  = 0x00200000;  // each block 2MB
-
-// Special: Octane PROM maps framebuffer at CRM_BASE
-// PROM requests 1280x1024 at 32-bit color by default.
+static constexpr uint64_t MMIO_SIZE  = 0x00200000; // 2MB per region
 
 // -----------------------------------------------------------
-// MMIO read32
+// MMIO READ32
 // -----------------------------------------------------------
 uint32_t Emulator::mmio_read32(uint64_t phys)
 {
+    // -----------------------------
     // HEART
-    if (phys >= HEART_BASE && phys < HEART_BASE + MMIO_SIZE) {
+    // -----------------------------
+    if (phys >= HEART_BASE && phys < HEART_BASE + MMIO_SIZE)
+    {
         uint32_t off = phys - HEART_BASE;
 
-        // PROM probes HEART revision register
-        if (off == 0x0000) {
-            // Fake a simple HEART version (PROM only checks non-zero)
-            return 0x00010001; 
-        }
+        // PROM checks this register to know the chip exists.
+        if (off == 0x0000)
+            return 0x00010001;  // fake HEART version
 
-        // default stub
         return 0;
     }
 
+    // -----------------------------
     // HUB
-    if (phys >= HUB_BASE && phys < HUB_BASE + MMIO_SIZE) {
+    // -----------------------------
+    if (phys >= HUB_BASE && phys < HUB_BASE + MMIO_SIZE)
+    {
         uint32_t off = phys - HUB_BASE;
 
-        // PROM probes memory controller registers
-        if (off == 0x0010) {
-            return 0x00000002;  // 2 memory banks
-        }
+        // PROM checks number of RAM banks
+        if (off == 0x0010)
+            return 0x2; // pretend 2 banks present
 
         return 0;
     }
 
-    // MACE (serial, RTC, PS/2, etc)
-    if (phys >= MACE_BASE && phys < MACE_BASE + MMIO_SIZE) {
+    // -----------------------------
+    // MACE (PROM UART + misc I/O)
+    // -----------------------------
+    if (phys >= MACE_BASE && phys < MACE_BASE + MMIO_SIZE)
+    {
         uint32_t off = phys - MACE_BASE;
 
-        // Serial port read (PROM uses this!)
-        if (off == 0x50000) {
-            // Return "no character"
+        // PROM polls this for console input
+        // No input → return -1
+        if (off == 0x50000)
             return 0xFFFFFFFF;
-        }
 
         return 0;
     }
 
+    // -----------------------------
     // CRM / SI Graphics
-    if (phys >= CRM_BASE && phys < CRM_BASE + MMIO_SIZE) {
+    // -----------------------------
+    if (phys >= CRM_BASE && phys < CRM_BASE + MMIO_SIZE)
+    {
         uint32_t off = phys - CRM_BASE;
 
-        // PROM reads CRM status register
-        if (off == 0x0000) {
-            return 0x00000001; // "present"
-        }
+        // PROM checks CRM "present" bit
+        if (off == 0x0000)
+            return 0x00000001;
 
-        // PROM reads board ID
-        if (off == 0x0004) {
-            return 0x00000020; // SI board type
-        }
+        // Board type: 0x20 = SI Graphics
+        if (off == 0x0004)
+            return 0x00000020;
 
         return 0;
     }
 
-    std::cerr << "[MMIO] Unknown read32 @ phys=0x" 
+    // -----------------------------
+    // Unknown MMIO
+    // -----------------------------
+    std::cerr << "[MMIO] Unknown read32 @ 0x"
               << std::hex << phys << std::dec << "\n";
+
     return 0;
 }
 
 // -----------------------------------------------------------
-// MMIO write32
+// MMIO WRITE32
 // -----------------------------------------------------------
 void Emulator::mmio_write32(uint64_t phys, uint32_t val)
 {
+    // -----------------------------
     // HEART
-    if (phys >= HEART_BASE && phys < HEART_BASE + MMIO_SIZE) {
-        uint32_t off = phys - HEART_BASE;
-
-        // PROM writes watchdog registers, ignore safely
-        if (off < 0x1000) return;
-
+    // -----------------------------
+    if (phys >= HEART_BASE && phys < HEART_BASE + MMIO_SIZE)
+    {
+        // HEART writes are ignored safely
         return;
     }
 
+    // -----------------------------
     // HUB
-    if (phys >= HUB_BASE && phys < HUB_BASE + MMIO_SIZE) {
-        uint32_t off = phys - HUB_BASE;
-
-        // ignore for now, safe stub
+    // -----------------------------
+    if (phys >= HUB_BASE && phys < HUB_BASE + MMIO_SIZE)
+    {
+        // HUB writes ignored
         return;
     }
 
-    // MACE I/O
-    if (phys >= MACE_BASE && phys < MACE_BASE + MMIO_SIZE) {
+    // -----------------------------
+    // MACE — PROM serial output
+    // -----------------------------
+    if (phys >= MACE_BASE && phys < MACE_BASE + MMIO_SIZE)
+    {
         uint32_t off = phys - MACE_BASE;
 
-        // Serial output: PROM prints characters here
-        if (off == 0x50000) {
+        // PROM writes serial output characters here:
+        if (off == 0x50000)
+        {
             char c = (char)(val & 0xFF);
-            std::cout << c;
+            std::cout << c; // print PROM output
             return;
         }
 
         return;
     }
 
-    // CRM Graphics
-    if (phys >= CRM_BASE && phys < CRM_BASE + MMIO_SIZE) {
-        uint32_t off = phys - CRM_BASE;
-
-        // PROM sometimes writes display config registers
+    // -----------------------------
+    // CRM / SI Graphics
+    // -----------------------------
+    if (phys >= CRM_BASE && phys < CRM_BASE + MMIO_SIZE)
+    {
+        // For now, ignore writes — framebuffer handled in Part 3
         return;
     }
 
-    std::cerr << "[MMIO] Unknown write32 @ phys=0x"
-              << std::hex << phys << " = 0x" << val << std::dec << "\n";
+    // -----------------------------
+    // Unknown MMIO
+    // -----------------------------
+    std::cerr << "[MMIO] Unknown write32 @ 0x"
+              << std::hex << phys
+              << " = 0x" << val
+              << std::dec << "\n";
 }
 
 // -----------------------------------------------------------
-// SYSTEM READ (CPU -> MMU -> RAM/MMIO dispatcher)
+// System read/write entry points (CPU calls these)
 // -----------------------------------------------------------
 uint32_t Emulator::sys_read32(uint64_t phys)
 {
-    // MMIO?
     if (phys >= HEART_BASE)
         return mmio_read32(phys);
 
-    // RAM
-    return memory.read32(phys);
+    return mem->read32(phys);
 }
 
-// -----------------------------------------------------------
-// SYSTEM WRITE
-// -----------------------------------------------------------
 void Emulator::sys_write32(uint64_t phys, uint32_t val)
 {
-    if (phys >= HEART_BASE) {
+    if (phys >= HEART_BASE)
         mmio_write32(phys, val);
-        return;
-    }
-
-    memory.write32(phys, val);
-}
-
-// -----------------------------------------------------------
-// PROM load helper
-// -----------------------------------------------------------
-bool Emulator::load_prom(const std::string& path)
-{
-    FILE* f = fopen(path.c_str(), "rb");
-    if (!f) {
-        std::cerr << "[Emu] Failed to open PROM file: " << path << "\n";
-        return false;
-    }
-
-    std::vector<uint8_t> buf;
-    buf.resize(4 * 1024 * 1024);  // up to 4 MB PROM
-
-    size_t n = fread(buf.data(), 1, buf.size(), f);
-    fclose(f);
-
-    if (n == 0) {
-        std::cerr << "[Emu] PROM file empty\n";
-        return false;
-    }
-
-    // PROM is mapped at high virtual, but physically loaded at 0x1FC00000
-    uint64_t prom_phys_base = 0x1FC00000;
-
-    // load into RAM
-    memory.load_blob(prom_phys_base, buf.data(), n);
-
-    std::cout << "[Emu] PROM loaded: " << n << " bytes\n";
-    return true;
+    else
+        mem->write32(phys, val);
 }
