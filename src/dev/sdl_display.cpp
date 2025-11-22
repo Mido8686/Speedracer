@@ -32,7 +32,7 @@ bool SDLDisplay::init(uint32_t w, uint32_t h)
     fb_height = h;
 
     window = SDL_CreateWindow(
-        "Speedracer Emulator - SGI Octane1",
+        "Racer Emulator - SGI Octane1",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         w, h,
