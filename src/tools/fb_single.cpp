@@ -136,7 +136,7 @@ static SDL_Rect compute_dest_rect(int winW, int winH, int fbW, int fbH, bool int
 }
 
 int main(int argc, char** argv) {
-    std::cout << "Speedracer framebuffer test (single-file)\n";
+    std::cout << "Racer framebuffer test (single-file)\n";
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << "\n";
         return 1;
@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
     bool useVsync = true;
 
     // Create window at native size (resizable)
-    SDL_Window* window = SDL_CreateWindow("Speedracer - SGI Octane Framebuffer",
+    SDL_Window* window = SDL_CreateWindow("Racer - SGI Octane Framebuffer",
                                           SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                           FB_W, FB_H,
                                           SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
