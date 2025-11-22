@@ -1,7 +1,7 @@
 // -----------------------------------------------------------
 // cp0.h
 // -----------------------------------------------------------
-// Speedracer SGI Octane1 Emulator
+// Racer SGI Octane1 Emulator
 // MIPS CP0 (System Control Coprocessor)
 // Minimal implementation to support:
 //  - Status register
