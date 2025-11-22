@@ -1,7 +1,7 @@
 // -----------------------------------------------------------
 // sdl_display.h
 // -----------------------------------------------------------
-// SDL2 display window for Speedracer Emulator framebuffer
+// SDL2 display window for Racer Emulator framebuffer
 // -----------------------------------------------------------
 
 #pragma once
