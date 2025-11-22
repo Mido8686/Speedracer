@@ -1,7 +1,7 @@
 // -----------------------------------------------------------
 // cpu.h
 // -----------------------------------------------------------
-// Speedracer SGI Octane1 Emulator
+// Racer SGI Octane1 Emulator
 // MIPS CPU Core - Header Definition
 //
 // Provides the CPU class interface used by cpu.cpp
