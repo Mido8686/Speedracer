@@ -1,7 +1,7 @@
 // -----------------------------------------------------------
 // framebuffer.h
 // -----------------------------------------------------------
-// Speedracer SGI Octane1 Emulator
+// Racer SGI Octane1 Emulator
 // Simple SI/CRM framebuffer:
 //   - 1280x1024
 //   - 32-bit ARGB
