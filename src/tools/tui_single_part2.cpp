@@ -1,7 +1,7 @@
 // -----------------------------------------------------------
 // tui_single_part2.cpp
 // -----------------------------------------------------------
-// Speedracer Emulator (SGI Octane1)
+// Racer Emulator (SGI Octane1)
 // Text-based UI launcher with configurable RAM
 // -----------------------------------------------------------
 
@@ -87,7 +87,7 @@ int main()
 {
     while (true)
     {
-        std::cout << "\nSpeedracer Emulator (SGI Octane1)\n";
+        std::cout << "\nRacer Emulator (SGI Octane1)\n";
         std::cout << "---------------------------------\n";
         std::cout << "1) Launch SGI Octane\n";
         std::cout << "2) Settings\n";
